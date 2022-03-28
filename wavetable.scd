@@ -146,9 +146,8 @@ s.waitForBoot({
 });
 )
 
-/////////// MIDI keyboard enable (also stops the pattern) ////////////
+/////////// MIDI keyboard enable ////////////
 (
-p.stop;
 MIDIClient.init;
 MIDIIn.connectAll;
 
