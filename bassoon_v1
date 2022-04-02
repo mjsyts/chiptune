@@ -1,0 +1,486 @@
+(
+//cleanup
+t.stop;
+s = Server.local;
+s.freeAllBuffers;
+s.freeAll;
+
+//////////////		SET MASTER TEMPO		///////////////
+
+~bpm = 144/60;
+t = TempoClock.new(~bpm).permanent_(true);
+
+
+//////////////		INIT LFSR NOISE GEN		///////////////
+
+s.waitForBoot({
+	(
+		~longCycle = { |bits = 15|
+			var rightShiftMask = ((1 << (bits-1)) - 1) << 1;
+
+			var rotateBits = { |int|
+				(int & 1 << (bits-1)) | (int & rightShiftMask >> 1)
+			};
+
+			var rotateAndXor = { |int|
+				int = rotateBits.(int);
+				(int & rightShiftMask) | (
+					(int & 2 >> 1) bitXor: (int & 1)
+				)
+			};
+
+			var new = 1;
+			var array = [1];
+
+			while {
+				new = rotateAndXor.(new);
+				new != 1
+			} {
+				array = array.add(new);
+			};
+			array
+		};
+		~shortCycle = { |bits = 7|
+			var rightShiftMask = ((1 << (bits-1)) - 1) << 1;
+
+			var rotateBits = { |int|
+				(int & 1 << (bits-1)) | (int & rightShiftMask >> 1)
+			};
+
+			var rotateAndXor = { |int|
+				int = rotateBits.(int);
+				(int & rightShiftMask) | (
+					(int & 2 >> 1) bitXor: (int & 1)
+				)
+			};
+
+			var new = 1;
+			var array = [1];
+
+			while {
+				new = rotateAndXor.(new);
+				new != 1
+			} {
+				array = array.add(new);
+			};
+
+			array
+		};
+
+	);
+
+	s.sync;
+
+	// ~wtEnv.plot
+
+	// x = ~shortCycle.(7);
+	// y = ~longCycle.(15);
+	// x.size;  // 127
+	// y.size;  // 32767
+	~b0 = Buffer.loadCollection(s, ~longCycle.(15) & 1 - 0.5, 1);
+	~b1 = Buffer.loadCollection(s, ~shortCycle.(7) & 1 - 0.5, 1);
+
+	s.sync;
+
+	SynthDef(\pulse, {
+		arg duty=0.5, amp=0.25, pan=0, freq=261.63, out=0, atk=1/64, hold=1, rel=8/64, sweepTime=1/16, sweepOn=0, sweepInt=12, swCurve=(-4.0);
+		var sig, env, sweep, pitch;
+		sweep = EnvGen.ar(Env([sweepInt.midiratio, 1], [sweepTime], swCurve), 1.0);
+		pitch = Select.kr(sweepOn, [freq, freq*sweep]);
+		sig = Pulse.ar(pitch, duty);
+		env = EnvGen.ar(
+			Env([0,1,1,0],[atk,hold,rel],-4),
+			doneAction:2
+		).round(1/16);
+		sig = sig*amp*env;
+		sig = Pan2.ar(sig, pan);
+		Out.ar(out, sig);
+	}
+	).add;
+
+	SynthDef(\pulseADSR, {
+		arg duty=0.5, amp=0.25, pan=0, freq=261.63, out=0, atk=1/64, dec=0, sus=1, rel=8/64, sweepTime=1/16, sweepOn=0, sweepInt=12, swCurve=(-4.0), aCurve=(-4.0), dCurve=(-4.0), rCurve=(-4.0);
+		var sig, env, sweep, pitch;
+		sweep = EnvGen.ar(Env([sweepInt.midiratio, 1], [sweepTime], swCurve), 1.0);
+		pitch = Select.kr(sweepOn, [freq, freq*sweep]);
+		sig = Pulse.ar(pitch, duty);
+		env = EnvGen.ar(
+			Env([0,1,sus,0],
+				[atk,dec,rel],
+				[aCurve, dCurve, rCurve],
+				2),
+			doneAction:2
+		).round(1/16);
+		sig = sig*amp*env;
+		sig = Pan2.ar(sig, pan);
+		Out.ar(out, sig);
+	}
+	).add;
+
+	SynthDef(\wt, {
+		arg bufnum=~b2, freq=440, pan=0, amp=1, out=0, gate=1;
+		var sig, env;
+		sig = Osc.ar(bufnum, freq);
+		Out.ar(out, sig);
+	}
+	).add;
+
+	SynthDef(\noise, {
+		arg bufnum=~b0, freq=524288, pan=0, amp=1, out=0, trig=1, atk=1/64, rel=3/64, hold=1/4, psSel = 3,
+		cSel = 0;
+		var rate, phase, sig, env, clock, prescaler;
+		prescaler = Select.kr(psSel, [2,1,1/2,1/3,1/4,1/5,1/6,1/7]);
+		clock = Select.kr(cSel, (1..14));
+		clock = 0.5.pow(clock);
+		rate = freq*prescaler*clock;
+		phase = Phasor.ar(0, rate * SampleDur.ir, 0, BufFrames.kr(bufnum));
+		sig = BufRd.ar(1, bufnum, phase, interpolation: 1);
+		env = EnvGen.ar(
+			Env([0,1,1,0],[atk,hold,rel],-4),
+			doneAction:2
+		).round(1/16);
+		sig = sig*amp*env;
+		sig = Pan2.ar(sig, pan);
+		Out.ar(out, sig);
+	}
+	).add;
+
+	SynthDef(\mouseNoise, {
+		arg freq=524288, pan=0, amp=0.25, out=0, gate=1, bufnum=~b0;
+		var rate, phase, sig, env, cycle, prescaler, psSel, cSel, clock, mouse;
+		psSel = MouseY.kr(0,7);
+		cSel = MouseX.kr(0,13);
+		prescaler = Select.kr(psSel, [2,1,1/2,1/3,1/4,1/5,1/6,1/7]);
+		clock = Select.kr(cSel, (1..14));
+		clock = (1/2).pow(clock);
+		rate = freq*prescaler*clock;
+		phase = Phasor.ar(0, rate * SampleDur.ir, 0, BufFrames.kr(bufnum));
+		sig = BufRd.ar(1, bufnum, phase, interpolation: 1);
+		// env = EnvGen.kr(Env.perc, doneAction:2);
+		sig = sig*amp;
+		sig = Pan2.ar(sig, pan);
+		Out.ar(out, sig);
+	}
+	).add;
+
+	(
+		~pa1 = Pbind(							//opening bass
+			\instrument, \pulse,
+			\dur, 1/4,
+			\freq, Pseq(([
+				51, 51, \, 51,
+				51, \, 51, 51,
+				\, 51, 51, \,
+				54, 54, 56, 56
+			]-12).midicps,1),
+			\amp, 5/16,
+			\duty, 0.25,
+			\hold, 1/8,
+			\pan, 0
+		);
+
+		~pa1Del = Pbind(							//opening bass delay
+			\instrument, \pulse,
+			\dur, 1/4,
+			\freq, Pseq(([
+				51, 51, \, 51,
+				51, \, 51, 51,
+				\, 51, 51, \,
+				54, 54, 56, 56
+			]-12).midicps,1),
+			\amp, 1/16,
+			\duty, 0.125,
+			\hold, 1/8,
+			\pan, 0.4
+		);
+
+		~pa2 = Pbind(							//softer bass w kick
+			\instrument, \pulse,
+			\dur, Pseq([1/4],9)++Pseq([1/16],4)++Pseq([1/4],6),
+			\sweepOn, Pseq([
+				1, 0, \, 0,
+				1, \, 0, 0,
+				1,\,\,\, 0, 0, \,
+				1, 0, 0, 0
+			]),
+			\sweepTime, 1/8,
+			\sweepInt, 24,
+			\freq, Pseq(([
+				51, 51, \, 51,
+				51, \, 51, 51,
+				51,\,\,\, 51, 51, \,
+				54, 54, 56, 56
+			]-12).midicps,1),
+			\amp, 5/16,
+			\duty, 0.25,
+			\hold, Pseq([1/8],9)++Pseq([1/32],4)++Pseq([1/8],6),
+		);
+
+		~paTomFill = Pbind(
+			\instrument, \pulse,
+			\freq, Pstutter(4, Pseq([62,57,53,49].midicps)),
+			\dur, Pseq([1/4], 16),
+			\duty, 0.25,
+			\amp, Pstutter(2, Pseq((1..8)/16)),
+			\pan, Pstutter(4, Pwhite(-1.0,1.0)),
+			\atk, 0/64,
+			\hold, 2/64,
+			\rel, 2/64,
+			\sweepTime, 3/64,
+			\sweepOn, 1,
+			\sweepInt, 24,
+			\swCurve, (-4.0)
+		);
+
+		~pb1 = Pbind(							//sextuplets
+			\instrument, \pulse,
+			\dur, Pseq([Rest(4), Rest(4), Rest(4), Rest(2), Pseq([1/6], 12)]),
+			\freq, Pseq(([
+				\,
+				\,
+				\,
+				\,
+				51, 54, 56, 54, 56, 58,
+				56, 58, 61, 58, 61, 62,
+			]).midicps),
+			\amp, Pseq((0!4)++(4/16!4)++(5/16!3)++(6/16!2)++(7/16)++(8/16)++(9/16)),
+			\pan, Pwhite(-1.0,1.0),
+			\duty, 0.25,
+			\hold, 1/16,
+			\atk, 1/64,
+			\rel, 2/64,
+		);
+
+		~pb2 = Pbind(							//beat 1
+			\instrument, \pulse,
+			\dur, Pseq([1, Rest(15/4)]),
+			\freq, (63).midicps,
+			\amp, 10/16,
+			\duty, 0.25,
+			\hold, 24/64,
+			\atk, 1/64,
+			\rel, 2/64,
+		);
+
+		~pb3 = Pmono(							//whole note line
+			\pulse,
+			\dur, 4,
+			\freq, Pseq([73,72,71,70]).midicps,
+			\amp, 7/16,
+			\duty, 0.25,
+			\hold, 0.4167*16,
+			\atk, 8/64,
+			\rel, 4/64,
+		);
+
+		~pb4 = Pmono(							//whole note line variation
+			\pulse,
+			\dur, 2,
+			\freq, Pseq([
+				82,82,
+				81,81,
+				80,79,
+				78,78]).midicps,
+			\amp, 7/16,
+			\duty, 0.25,
+			\hold, 0.4167*16,
+			\atk, 8/64,
+			\rel, 4/64,
+		);
+
+
+		//////////////		NOISE PATTERNS		///////////////
+
+
+		~snare = Pbind(						//one shot 8th
+			\instrument, \noise,
+			\dur, Pseq([1/2, Rest(1/2)]),
+			\bufnum, ~b1,
+			\freq, 524288,
+			\pan, 0,
+			\amp, 4/16,
+			\hold, 5/64,
+			\atk, 0,
+			\rel, 1/64,
+			\psSel, 5,
+			\cSel, 4,
+		);
+
+		~snareFill1 =
+		Pbind(
+			\instrument, \noise,
+			\bufnum, ~b1,
+			\dur, Pseq([1/4], 4),
+			\pan, 0,
+			\freq, 524288,
+			\amp, 5/16,
+			\hold, 2/64,
+			\atk, 0/64,
+			\rel, 5/64,
+			\psSel, 5,
+			\cSel, 4,
+			\legato, 1.0
+		);
+
+		~randHat = Pbind(					//1 beat random 16ths
+			\instrument, \noise,
+			\dur, Pwrand([1/4, Rest(1/4)],[0.8,0.2],4),
+			\bufnum, ~b0,
+			\freq, 524288,
+			\pan, 0,
+			\amp, Prand((1..3)/16, inf),
+			\hold, 2/64,
+			\atk, 0,
+			\rel, 4/64,
+			\psSel, 2,
+			\cSel, 2,
+			\legato, 1.0
+		);
+
+		~randHat2 = Pbind(					//fills the rest of beat 2 & 4 in a backbeat
+			\instrument, \noise,
+			\dur, Pseq([Rest(1/2),Pwrand([1/4, Rest(1/4)],[0.8,0.2],2)]),
+			\bufnum, ~b0,
+			\freq, 524288,
+			\pan, 0,
+			\amp, Prand((1..3)/16, inf),
+			\hold, 2/64,
+			\atk, 0,
+			\rel, 4/64,
+			\psSel, 2,
+			\cSel, 2,
+			\legato, 1.0
+		);
+
+		~backbeat = Pseq(
+			[
+				~randHat,
+				Ppar([~randHat2,
+					~snare]
+				)
+			],
+		);
+
+		~fill1 = Pseq(
+			[
+				~randHat,
+				~snareFill1
+			],
+		);
+
+
+		//////////////		Phrases		///////////////
+
+		~ph1 = Ppar([
+			Pseq([~pa1], 4),
+			Pseq([
+				~pb1
+			])
+		]);
+
+		// ~del = Ptpar([0.0, ~pa1, 0.3, ~pa1Del]);
+
+		~ph2 = Ppar([
+			Pseq([~pa2,~pa2,~pa2,~pa1]),
+			~pb2,
+			Pseq([~backbeat],6)++~paTomFill,
+		]);
+
+		~ph3 = Ppar([
+			Pseq([~pa2],6),
+			Pseq([~backbeat],11)++~fill1,
+			~pb3
+		]);
+
+		~ph4 = Ppar([
+			Pseq([~pa2],6),
+			Pseq([~backbeat],11)++~fill1,
+			~pb4,
+			~pb3
+		]);
+
+		~track = Pseq([
+			~ph1,
+			~ph2,
+			~ph3,
+			~ph4
+		])
+	);
+
+	(
+		~track.play(t)
+	)
+};
+)
+)
+
+~b1.plot
+
+(
+Synth(
+	[\instrument, \pulse,
+		\duty, 0.5
+	]
+)
+)
+
+
+////// Tests //////
+// ~ph4.play(t)
+// (
+// (
+// PmonoArtic(
+// 	\pulseADSR,
+// 	\dur, 1/4,
+// 	\sweepOn, 0,
+// 	\sweepTime, 1/8,
+// 	\sweepInt, 24,
+// 	\freq, Pseq(([
+// 		51, 51, \, 51,
+// 		51, \, 51, 51,
+// 		\, 51, 51, \,
+// 		54, 54, 56, 56
+// 	]-12).midicps,1),
+// 	\amp, 5/16,
+// 	\rel, 1,
+// 	\duty, 0.25,
+// 	\atk, 0,
+// 	\sustain, 0.2
+// );
+// ).play(t)
+// )
+//
+//
+// (
+// (
+// Pmono(
+// 	\noise,
+// 	\bufnum, ~b1,
+// 	\dur, 1/4,
+// 	\pan, 0,
+// 	\freq, 524288,
+// 	\amp, 5/16,
+// 	\hold, 0.4167*2,
+// 	\atk, 0/64,
+// 	\rel, 5/64,
+// 	\psSel, 11,
+// 	\cSel, Prand((1..7),8).trace,
+// 	\legato, 1.0
+// )
+// ).play(t)
+// )
+//
+// (
+// Synth(\noise, [
+// 	\bufnum, ~b1,
+// 	\pan, 0,
+// 	\amp, 4/16,
+// 	\hold, 1/64,
+// 	\atk, 0,
+// 	\rel, 4/64,
+// 	\psSel, 5,
+// 	\cSel, 4,
+// 	]
+// )
+// )
+//
